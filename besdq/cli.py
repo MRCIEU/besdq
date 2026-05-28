@@ -97,6 +97,12 @@ def main():
 
     parser.add_argument('--index',
                         help='Create SQLite index database at specified path (e.g. data/westra.db). Requires --beqtl-summary.')
+    parser.add_argument('--n-mode', choices=['scalar', 'vector'], default='scalar',
+                        help='Sample-size storage mode: scalar (one n per probe) or vector (one n per SNP-probe pair). Default: scalar.')
+    parser.add_argument('--sample-size', type=int, default=None,
+                        help='Scalar sample size N used for --n-mode scalar. If omitted and ESI has allele frequencies, n is computed from the data.')
+    parser.add_argument('--trait-variance', default=None, dest='trait_variance',
+                        help='Two-column TSV (probe_id  var_y) supplying per-probe trait variance. Probes absent from the file default to var_y=1.0.')
     parser.add_argument('--query', type=float, default=0.05,
                         help='P-value threshold for filtering results')
     parser.add_argument('--snp-chr',
@@ -142,7 +148,13 @@ def main():
         try:
             print(f"Building SQLite index from BESD files: {args.beqtl_summary}")
             builder = BESDIndexBuilder(args.index)
-            builder.build(args.beqtl_summary, force=False)
+            builder.build(
+                args.beqtl_summary,
+                force=False,
+                n_mode=args.n_mode,
+                sample_size=args.sample_size,
+                trait_variance_path=args.trait_variance,
+            )
             print(f"Index created: {args.index}")
             return
         except Exception as e:

@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import List, Dict, Tuple
 import numpy as np
 
+from .stats import _reconstruct_beta_se
+
 
 def norm_cdf(z: float) -> float:
     """Approximate normal CDF using Abramowitz and Stegun formula.
@@ -42,11 +44,6 @@ class BESDQueryIndex:
     """Query BESD data from SQLite index database."""
 
     def __init__(self, db_path: str):
-        """Initialize query engine with SQLite database.
-
-        Args:
-            db_path: Path to SQLite database file
-        """
         self.db_path = Path(db_path)
         if not self.db_path.exists():
             raise FileNotFoundError(f"Database not found: {db_path}")
@@ -56,34 +53,24 @@ class BESDQueryIndex:
         self._load_metadata()
 
     def _load_metadata(self) -> None:
-        """Load metadata from database."""
         cursor = self.conn.cursor()
         cursor.execute("SELECT key, value FROM besd_meta")
         self.metadata = {row['key']: row['value'] for row in cursor.fetchall()}
 
     def close(self) -> None:
-        """Close database connection."""
         self.conn.close()
 
     def __enter__(self):
-        """Context manager entry."""
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        """Context manager exit."""
         self.close()
 
+    # ------------------------------------------------------------------
+    # Range / metadata queries (unchanged)
+    # ------------------------------------------------------------------
+
     def query_snp_range(self, chr_val: str, start_kb: float, end_kb: float) -> List[Dict]:
-        """Query SNPs in chromosome range (coordinates in kb).
-
-        Args:
-            chr_val: Chromosome
-            start_kb: Start position in kb
-            end_kb: End position in kb
-
-        Returns:
-            List of SNP records as dicts
-        """
         start_bp = int(start_kb * 1000)
         end_bp = int(end_kb * 1000)
 
@@ -98,16 +85,6 @@ class BESDQueryIndex:
         return [dict(row) for row in cursor.fetchall()]
 
     def query_probe_range(self, chr_val: str, start_kb: float, end_kb: float) -> List[Dict]:
-        """Query probes in chromosome range (coordinates in kb).
-
-        Args:
-            chr_val: Chromosome
-            start_kb: Start position in kb
-            end_kb: End position in kb
-
-        Returns:
-            List of probe records as dicts
-        """
         start_bp = int(start_kb * 1000)
         end_bp = int(end_kb * 1000)
 
@@ -121,76 +98,86 @@ class BESDQueryIndex:
 
         return [dict(row) for row in cursor.fetchall()]
 
+    # ------------------------------------------------------------------
+    # Core statistics reader — reconstructs beta/SE from z-scores
+    # ------------------------------------------------------------------
+
     def get_probe_snps(self, probe_idx: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Get SNP indices, betas, and SEs for a probe.
-
-        Args:
-            probe_idx: Probe row index
-
-        Returns:
-            Tuple of (snp_indices, betas, ses) as numpy arrays
-        """
+        """Return (snp_indices, betas, ses) for a probe, reconstructed from z-scores."""
         cursor = self.conn.cursor()
         cursor.execute("""
-            SELECT snp_indices, betas, ses, snp_count
-            FROM probe_data
-            WHERE probe_idx = ?
+            SELECT pd.snp_indices, pd.zscores, pd.n_scalar, pd.se_vector, pd.snp_count,
+                   e.var_y
+            FROM probe_data pd
+            JOIN epi e ON e.row_idx = pd.probe_idx
+            WHERE pd.probe_idx = ?
         """, (probe_idx,))
 
         row = cursor.fetchone()
-        if not row:
-            return np.array([], dtype=np.int32), np.array([], dtype=np.float32), np.array([], dtype=np.float32)
+        empty = (
+            np.array([], dtype=np.int32),
+            np.array([], dtype=np.float64),
+            np.array([], dtype=np.float64),
+        )
+        if not row or row['snp_count'] == 0:
+            return empty
 
-        snp_count = row['snp_count']
-        if snp_count == 0:
-            return np.array([], dtype=np.int32), np.array([], dtype=np.float32), np.array([], dtype=np.float32)
-
-        # Deserialize BLOBs
         snp_indices = np.frombuffer(row['snp_indices'], dtype=np.int32)
-        betas = np.frombuffer(row['betas'], dtype=np.float32)
-        ses = np.frombuffer(row['ses'], dtype=np.float32)
+        zscores = np.frombuffer(row['zscores'], dtype=np.float16).astype(np.float64)
 
+        if row['se_vector'] is not None:
+            # Vector mode: SE stored directly; beta = z * se, no AF needed
+            ses = np.frombuffer(row['se_vector'], dtype=np.float16).astype(np.float64)
+            betas = zscores * ses
+            return snp_indices, betas, ses
+
+        # Scalar mode: reconstruct SE from n + AF + var_y
+        if row['n_scalar'] is None:
+            raise ValueError(f"No n_scalar or se_vector for probe_idx={probe_idx}")
+
+        var_y = row['var_y'] if row['var_y'] is not None else 1.0
+        n = float(row['n_scalar'])
+
+        snp_list = [int(i) for i in snp_indices]
+        placeholders = ','.join('?' * len(snp_list))
+        cursor.execute(
+            f"SELECT row_idx, freq FROM esi WHERE row_idx IN ({placeholders})",
+            snp_list,
+        )
+        af_lookup = {r['row_idx']: r['freq'] for r in cursor.fetchall()}
+        af_array = np.array(
+            [af_lookup.get(i, np.nan) for i in snp_list],
+            dtype=np.float64,
+        )
+
+        betas, ses = _reconstruct_beta_se(zscores, af_array, n, var_y=var_y)
         return snp_indices, betas, ses
+
+    # ------------------------------------------------------------------
+    # High-level query methods (signatures unchanged)
+    # ------------------------------------------------------------------
 
     def query_cis_window(
         self,
         snp_chr: str, snp_start_kb: float, snp_end_kb: float,
         probe_chr: str, probe_start_kb: float, probe_end_kb: float,
     ) -> List[Dict]:
-        """Query cis-window: SNP region + probe region.
-
-        Args:
-            snp_chr: SNP chromosome
-            snp_start_kb: SNP region start (kb)
-            snp_end_kb: SNP region end (kb)
-            probe_chr: Probe chromosome
-            probe_start_kb: Probe region start (kb)
-            probe_end_kb: Probe region end (kb)
-
-        Returns:
-            List of associations with metadata and statistics
-        """
-        # Get SNPs and probes in ranges
         snps = self.query_snp_range(snp_chr, snp_start_kb, snp_end_kb)
         probes = self.query_probe_range(probe_chr, probe_start_kb, probe_end_kb)
 
-        # Build SNP index set for fast lookup
         snp_indices_set = {s['row_idx'] for s in snps}
         snp_by_idx = {s['row_idx']: s for s in snps}
 
-        # Query associations
         associations = []
         for probe in probes:
             probe_idx = probe['row_idx']
             snp_indices, betas, ses = self.get_probe_snps(probe_idx)
 
-            # Find associations that match SNP range
             for i, snp_idx in enumerate(snp_indices):
                 if snp_idx in snp_indices_set:
                     snp = snp_by_idx[snp_idx]
                     beta = float(betas[i])
                     se = float(ses[i])
-
                     pval = calculate_p_value(beta, se)
 
                     associations.append({
@@ -211,47 +198,28 @@ class BESDQueryIndex:
         return associations
 
     def query_by_probe_id(self, probe_id: str) -> List[Dict]:
-        """Query all associations for a specific probe.
-
-        Args:
-            probe_id: Probe ID to query
-
-        Returns:
-            List of associations for the probe
-        """
         cursor = self.conn.cursor()
-
-        # Find probe
         cursor.execute("""
             SELECT row_idx, chr, probe_id, probe_bp, gene
-            FROM epi
-            WHERE probe_id = ?
+            FROM epi WHERE probe_id = ?
         """, (probe_id,))
-
         probe_row = cursor.fetchone()
         if not probe_row:
             return []
 
         probe = dict(probe_row)
-        probe_idx = probe['row_idx']
-
-        # Get probe data
-        snp_indices, betas, ses = self.get_probe_snps(probe_idx)
+        snp_indices, betas, ses = self.get_probe_snps(probe['row_idx'])
         if len(snp_indices) == 0:
             return []
 
-        # Get SNP metadata - convert numpy int32 to Python int for SQLite
-        snp_indices_list = [int(idx) for idx in snp_indices]
-        placeholders = ','.join('?' * len(snp_indices_list))
-        cursor.execute(f"""
-            SELECT row_idx, snp_id, chr, bp, a1, a2
-            FROM esi
-            WHERE row_idx IN ({placeholders})
-        """, snp_indices_list)
-
+        snp_list = [int(i) for i in snp_indices]
+        placeholders = ','.join('?' * len(snp_list))
+        cursor.execute(
+            f"SELECT row_idx, snp_id, chr, bp, a1, a2 FROM esi WHERE row_idx IN ({placeholders})",
+            snp_list,
+        )
         snp_by_idx = {row['row_idx']: dict(row) for row in cursor.fetchall()}
 
-        # Build results
         associations = []
         for i, snp_idx in enumerate(snp_indices):
             snp_idx_int = int(snp_idx)
@@ -259,9 +227,6 @@ class BESDQueryIndex:
                 snp = snp_by_idx[snp_idx_int]
                 beta = float(betas[i])
                 se = float(ses[i])
-
-                pval = calculate_p_value(beta, se)
-
                 associations.append({
                     'snp_id': snp['snp_id'],
                     'snp_chr': snp['chr'],
@@ -274,30 +239,14 @@ class BESDQueryIndex:
                     'gene': probe['gene'],
                     'beta': beta,
                     'se': se,
-                    'pval': pval,
+                    'pval': calculate_p_value(beta, se),
                 })
 
         return associations
 
-
     def query_by_snp_id(self, snp_id: str) -> List[Dict]:
-        """Query all associations for a specific SNP.
-
-        Args:
-            snp_id: SNP ID to query
-
-        Returns:
-            List of associations for the SNP
-        """
         cursor = self.conn.cursor()
-
-        # Find SNP
-        cursor.execute("""
-            SELECT row_idx, chr, snp_id, bp, a1, a2
-            FROM esi
-            WHERE snp_id = ?
-        """, (snp_id,))
-
+        cursor.execute("SELECT row_idx, chr, snp_id, bp, a1, a2 FROM esi WHERE snp_id = ?", (snp_id,))
         snp_row = cursor.fetchone()
         if not snp_row:
             return []
@@ -305,25 +254,17 @@ class BESDQueryIndex:
         snp = dict(snp_row)
         target_snp_idx = snp['row_idx']
 
-        # Search all probes for associations with this SNP
         associations = []
-        cursor.execute("""
-            SELECT row_idx, chr, probe_id, probe_bp, gene
-            FROM epi
-        """)
+        cursor.execute("SELECT row_idx, chr, probe_id, probe_bp, gene FROM epi")
         for probe_row in cursor.fetchall():
             probe_data = dict(probe_row)
-            probe_idx = probe_data['row_idx']
-            snp_indices, betas, ses = self.get_probe_snps(probe_idx)
+            snp_indices, betas, ses = self.get_probe_snps(probe_data['row_idx'])
 
-            # Find this SNP in the probe's data
             match_indices = np.where(snp_indices == target_snp_idx)[0]
             if len(match_indices) > 0:
                 match_idx = int(match_indices[0])
                 beta = float(betas[match_idx])
                 se = float(ses[match_idx])
-                pval = calculate_p_value(beta, se)
-
                 associations.append({
                     'snp_id': snp['snp_id'],
                     'snp_chr': snp['chr'],
@@ -336,74 +277,54 @@ class BESDQueryIndex:
                     'gene': probe_data['gene'],
                     'beta': beta,
                     'se': se,
-                    'pval': pval,
+                    'pval': calculate_p_value(beta, se),
                 })
 
         return associations
 
-
     def query_by_gene(self, gene_name: str) -> List[Dict]:
-        """Query all associations for a specific gene.
-
-        Args:
-            gene_name: Gene name to query
-
-        Returns:
-            List of associations for the gene
-        """
         cursor = self.conn.cursor()
-
-        # Find all probes for this gene
         cursor.execute("""
             SELECT row_idx, chr, probe_id, probe_bp, gene
-            FROM epi
-            WHERE gene = ?
+            FROM epi WHERE gene = ?
         """, (gene_name,))
-
         probes = [dict(row) for row in cursor.fetchall()]
         if not probes:
             return []
 
         associations = []
         for probe in probes:
-            probe_idx = probe['row_idx']
-            snp_indices, betas, ses = self.get_probe_snps(probe_idx)
+            snp_indices, betas, ses = self.get_probe_snps(probe['row_idx'])
+            if len(snp_indices) == 0:
+                continue
 
-            # Get SNP metadata for all SNPs in this probe
-            if len(snp_indices) > 0:
-                snp_indices_list = [int(idx) for idx in snp_indices]
-                placeholders = ','.join('?' * len(snp_indices_list))
-                cursor.execute(f"""
-                    SELECT row_idx, snp_id, chr, bp, a1, a2
-                    FROM esi
-                    WHERE row_idx IN ({placeholders})
-                """, snp_indices_list)
+            snp_list = [int(i) for i in snp_indices]
+            placeholders = ','.join('?' * len(snp_list))
+            cursor.execute(
+                f"SELECT row_idx, snp_id, chr, bp, a1, a2 FROM esi WHERE row_idx IN ({placeholders})",
+                snp_list,
+            )
+            snp_by_idx = {row['row_idx']: dict(row) for row in cursor.fetchall()}
 
-                snp_by_idx = {row['row_idx']: dict(row) for row in cursor.fetchall()}
-
-                # Build results
-                for i, snp_idx in enumerate(snp_indices):
-                    snp_idx_int = int(snp_idx)
-                    if snp_idx_int in snp_by_idx:
-                        snp = snp_by_idx[snp_idx_int]
-                        beta = float(betas[i])
-                        se = float(ses[i])
-
-                        pval = calculate_p_value(beta, se)
-
-                        associations.append({
-                            'snp_id': snp['snp_id'],
-                            'snp_chr': snp['chr'],
-                            'snp_bp': snp['bp'],
-                            'a1': snp['a1'],
-                            'a2': snp['a2'],
-                            'probe_id': probe['probe_id'],
-                            'probe_chr': probe['chr'],
-                            'probe_bp': probe['probe_bp'],
-                            'gene': probe['gene'],
-                            'beta': beta,
-                            'se': se,
-                            'pval': pval,
-                        })
+            for i, snp_idx in enumerate(snp_indices):
+                snp_idx_int = int(snp_idx)
+                if snp_idx_int in snp_by_idx:
+                    snp = snp_by_idx[snp_idx_int]
+                    beta = float(betas[i])
+                    se = float(ses[i])
+                    associations.append({
+                        'snp_id': snp['snp_id'],
+                        'snp_chr': snp['chr'],
+                        'snp_bp': snp['bp'],
+                        'a1': snp['a1'],
+                        'a2': snp['a2'],
+                        'probe_id': probe['probe_id'],
+                        'probe_chr': probe['chr'],
+                        'probe_bp': probe['probe_bp'],
+                        'gene': probe['gene'],
+                        'beta': beta,
+                        'se': se,
+                        'pval': calculate_p_value(beta, se),
+                    })
 
         return associations
