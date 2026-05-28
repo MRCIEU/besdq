@@ -90,10 +90,10 @@ class BESDQueryIndex:
 
         cursor = self.conn.cursor()
         cursor.execute("""
-            SELECT row_idx, chr, probe_id, genetic_dist, probe_bp, gene, orientation
+            SELECT row_idx, trait_id, trait_name, trait_chr, trait_bp, trait_var, gene, context
             FROM epi
-            WHERE chr = ? AND probe_bp >= ? AND probe_bp <= ?
-            ORDER BY probe_bp
+            WHERE trait_chr = ? AND trait_bp >= ? AND trait_bp <= ?
+            ORDER BY trait_bp
         """, (chr_val, start_bp, end_bp))
 
         return [dict(row) for row in cursor.fetchall()]
@@ -107,7 +107,7 @@ class BESDQueryIndex:
         cursor = self.conn.cursor()
         cursor.execute("""
             SELECT pd.snp_indices, pd.zscores, pd.n_scalar, pd.se_vector, pd.snp_count,
-                   e.var_y
+                   e.trait_var
             FROM probe_data pd
             JOIN epi e ON e.row_idx = pd.probe_idx
             WHERE pd.probe_idx = ?
@@ -131,11 +131,11 @@ class BESDQueryIndex:
             betas = zscores * ses
             return snp_indices, betas, ses
 
-        # Scalar mode: reconstruct SE from n + AF + var_y
+        # Scalar mode: reconstruct SE from n + AF + trait_var
         if row['n_scalar'] is None:
             raise ValueError(f"No n_scalar or se_vector for probe_idx={probe_idx}")
 
-        var_y = row['var_y'] if row['var_y'] is not None else 1.0
+        var_y = row['trait_var'] if row['trait_var'] is not None else 1.0
         n = float(row['n_scalar'])
 
         snp_list = [int(i) for i in snp_indices]
@@ -186,9 +186,9 @@ class BESDQueryIndex:
                         'snp_bp': snp['bp'],
                         'a1': snp['a1'],
                         'a2': snp['a2'],
-                        'probe_id': probe['probe_id'],
-                        'probe_chr': probe['chr'],
-                        'probe_bp': probe['probe_bp'],
+                        'trait_id': probe['trait_id'],
+                        'trait_chr': probe['trait_chr'],
+                        'trait_bp': probe['trait_bp'],
                         'gene': probe['gene'],
                         'beta': beta,
                         'se': se,
@@ -200,8 +200,8 @@ class BESDQueryIndex:
     def query_by_probe_id(self, probe_id: str) -> List[Dict]:
         cursor = self.conn.cursor()
         cursor.execute("""
-            SELECT row_idx, chr, probe_id, probe_bp, gene
-            FROM epi WHERE probe_id = ?
+            SELECT row_idx, trait_id, trait_chr, trait_bp, gene
+            FROM epi WHERE trait_id = ?
         """, (probe_id,))
         probe_row = cursor.fetchone()
         if not probe_row:
@@ -233,9 +233,9 @@ class BESDQueryIndex:
                     'snp_bp': snp['bp'],
                     'a1': snp['a1'],
                     'a2': snp['a2'],
-                    'probe_id': probe['probe_id'],
-                    'probe_chr': probe['chr'],
-                    'probe_bp': probe['probe_bp'],
+                    'trait_id': probe['trait_id'],
+                    'trait_chr': probe['trait_chr'],
+                    'trait_bp': probe['trait_bp'],
                     'gene': probe['gene'],
                     'beta': beta,
                     'se': se,
@@ -255,7 +255,7 @@ class BESDQueryIndex:
         target_snp_idx = snp['row_idx']
 
         associations = []
-        cursor.execute("SELECT row_idx, chr, probe_id, probe_bp, gene FROM epi")
+        cursor.execute("SELECT row_idx, trait_id, trait_chr, trait_bp, gene FROM epi")
         for probe_row in cursor.fetchall():
             probe_data = dict(probe_row)
             snp_indices, betas, ses = self.get_probe_snps(probe_data['row_idx'])
@@ -271,9 +271,9 @@ class BESDQueryIndex:
                     'snp_bp': snp['bp'],
                     'a1': snp['a1'],
                     'a2': snp['a2'],
-                    'probe_id': probe_data['probe_id'],
-                    'probe_chr': probe_data['chr'],
-                    'probe_bp': probe_data['probe_bp'],
+                    'trait_id': probe_data['trait_id'],
+                    'trait_chr': probe_data['trait_chr'],
+                    'trait_bp': probe_data['trait_bp'],
                     'gene': probe_data['gene'],
                     'beta': beta,
                     'se': se,
@@ -285,7 +285,7 @@ class BESDQueryIndex:
     def query_by_gene(self, gene_name: str) -> List[Dict]:
         cursor = self.conn.cursor()
         cursor.execute("""
-            SELECT row_idx, chr, probe_id, probe_bp, gene
+            SELECT row_idx, trait_id, trait_chr, trait_bp, gene
             FROM epi WHERE gene = ?
         """, (gene_name,))
         probes = [dict(row) for row in cursor.fetchall()]
@@ -318,9 +318,9 @@ class BESDQueryIndex:
                         'snp_bp': snp['bp'],
                         'a1': snp['a1'],
                         'a2': snp['a2'],
-                        'probe_id': probe['probe_id'],
-                        'probe_chr': probe['chr'],
-                        'probe_bp': probe['probe_bp'],
+                        'trait_id': probe['trait_id'],
+                        'trait_chr': probe['trait_chr'],
+                        'trait_bp': probe['trait_bp'],
                         'gene': probe['gene'],
                         'beta': beta,
                         'se': se,

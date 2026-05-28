@@ -91,7 +91,7 @@ class BESDIndexBuilder:
         self._write_snps(cursor, snps)
 
         print("Writing probe index...")
-        self._write_probes(cursor, probes, var_y_map)
+        self._write_traits(cursor, probes, var_y_map)
 
         # AF lookup is only needed for ScalarN reconstruction.
         # VectorN stores SE directly so needs no AF at all.
@@ -116,8 +116,8 @@ class BESDIndexBuilder:
         print("Creating indices...")
         cursor.execute("CREATE INDEX idx_esi_chr_bp ON esi(chr, bp)")
         cursor.execute("CREATE INDEX idx_esi_snp_id ON esi(snp_id)")
-        cursor.execute("CREATE INDEX idx_epi_chr_bp ON epi(chr, probe_bp)")
-        cursor.execute("CREATE INDEX idx_epi_probe_id ON epi(probe_id)")
+        cursor.execute("CREATE INDEX idx_epi_trait_chr_bp ON epi(trait_chr, trait_bp)")
+        cursor.execute("CREATE INDEX idx_epi_trait_id ON epi(trait_id)")
 
         conn.commit()
         conn.close()
@@ -151,13 +151,13 @@ class BESDIndexBuilder:
         cursor.execute("""
             CREATE TABLE epi (
                 row_idx INTEGER PRIMARY KEY,
-                chr TEXT NOT NULL,
-                probe_id TEXT NOT NULL,
-                genetic_dist REAL,
-                probe_bp INTEGER NOT NULL,
+                trait_id TEXT NOT NULL,
+                trait_name TEXT NOT NULL,
+                trait_chr TEXT,
+                trait_bp INTEGER,
+                trait_var REAL,
                 gene TEXT,
-                orientation TEXT,
-                var_y REAL
+                context TEXT
             )
         """)
 
@@ -195,20 +195,26 @@ class BESDIndexBuilder:
                 snp['bp'], snp['a1'], snp['a2'], snp['freq'],
             ))
 
-    def _write_probes(
+    def _write_traits(
         self,
         cursor: sqlite3.Cursor,
         probes: List[Dict],
         var_y_map: Dict[str, float],
     ) -> None:
         for probe in probes:
-            var_y = var_y_map.get(probe['probe_id'])  # None → NULL
+            trait_var = var_y_map.get(probe['probe_id'])  # None → NULL
             cursor.execute("""
-                INSERT INTO epi (row_idx, chr, probe_id, genetic_dist, probe_bp, gene, orientation, var_y)
+                INSERT INTO epi (row_idx, trait_id, trait_name, trait_chr, trait_bp, trait_var, gene, context)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, (
-                probe['row_idx'], probe['chr'], probe['probe_id'], probe['genetic_dist'],
-                probe['probe_bp'], probe['gene'], probe['orientation'], var_y,
+                probe['row_idx'],
+                probe['probe_id'],
+                probe['probe_id'],  # BESD has no separate trait name; use probe_id
+                probe.get('chr'),
+                probe.get('probe_bp'),
+                trait_var,
+                probe.get('gene'),
+                None,
             ))
 
     # ------------------------------------------------------------------
@@ -356,11 +362,11 @@ def _load_var_y(path: Optional[str], known_probe_ids: set) -> Dict[str, float]:
             except ValueError:
                 continue
 
-    # Warn for unrecognised probe IDs
+    # Warn for unrecognised trait IDs
     unknown = set(var_y_map) - known_probe_ids
     for pid in sorted(unknown):
         print(
-            f"Warning: --trait-variance file contains unrecognised probe ID '{pid}'",
+            f"Warning: --trait-variance file contains unrecognised trait ID '{pid}'",
             file=sys.stderr,
         )
 

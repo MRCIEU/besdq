@@ -121,7 +121,7 @@ class TestBESDQueryEngine(unittest.TestCase):
         )
         self.assertEqual(len(associations), 1)
         self.assertEqual(associations[0]['snp_id'], 'rs3818646')
-        self.assertEqual(associations[0]['probe_id'], 'ILMN_2349633')
+        self.assertEqual(associations[0]['trait_id'], 'ILMN_2349633')
 
     def test_range_query(self):
         associations = self.engine.query_cis_window(
@@ -171,9 +171,9 @@ class TestBESDQueryEngine(unittest.TestCase):
             probe_chr='1', probe_start_kb=1140.818, probe_end_kb=1140.818,
         )
         assoc = associations[0]
-        self.assertEqual(assoc['probe_id'], 'ILMN_2349633')
-        self.assertEqual(assoc['probe_chr'], '1')
-        self.assertEqual(assoc['probe_bp'], 1140818)
+        self.assertEqual(assoc['trait_id'], 'ILMN_2349633')
+        self.assertEqual(assoc['trait_chr'], '1')
+        self.assertEqual(assoc['trait_bp'], 1140818)
         self.assertEqual(assoc['gene'], 'TNFRSF18')
 
     def test_chromosome_filtering(self):
@@ -183,7 +183,7 @@ class TestBESDQueryEngine(unittest.TestCase):
         )
         for assoc in associations:
             self.assertEqual(assoc['snp_chr'], '1')
-            self.assertEqual(assoc['probe_chr'], '1')
+            self.assertEqual(assoc['trait_chr'], '1')
 
     def test_position_filtering(self):
         associations = self.engine.query_cis_window(
@@ -193,8 +193,8 @@ class TestBESDQueryEngine(unittest.TestCase):
         for assoc in associations:
             self.assertGreaterEqual(assoc['snp_bp'], 100000)
             self.assertLessEqual(assoc['snp_bp'], 2000000)
-            self.assertGreaterEqual(assoc['probe_bp'], 1000000)
-            self.assertLessEqual(assoc['probe_bp'], 2000000)
+            self.assertGreaterEqual(assoc['trait_bp'], 1000000)
+            self.assertLessEqual(assoc['trait_bp'], 2000000)
 
     def test_empty_query(self):
         associations = self.engine.query_cis_window(
@@ -214,8 +214,8 @@ class TestBESDQueryEngine(unittest.TestCase):
         assocs2 = self.engine.query_by_probe_id('ILMN_2112256')
         self.assertEqual(len(assocs1), 20)
         self.assertEqual(len(assocs2), 20)
-        probe_ids = {a['probe_id'] for a in assocs1 + assocs2}
-        self.assertEqual(len(probe_ids), 2)
+        trait_ids = {a['trait_id'] for a in assocs1 + assocs2}
+        self.assertEqual(len(trait_ids), 2)
 
     def test_gene_query(self):
         associations = self.engine.query_by_gene('TNFRSF18')
@@ -256,7 +256,7 @@ class TestBESDQueryIndex(unittest.TestCase):
         )
         self.assertEqual(len(associations), 1)
         self.assertEqual(associations[0]['snp_id'], 'rs3818646')
-        self.assertEqual(associations[0]['probe_id'], 'ILMN_2349633')
+        self.assertEqual(associations[0]['trait_id'], 'ILMN_2349633')
 
     def test_range_query(self):
         associations = self.index.query_cis_window(
@@ -292,19 +292,24 @@ class TestBESDQueryIndex(unittest.TestCase):
         self.assertNotIn('n_vector', cols)
         self.assertNotIn('betas', cols)
 
-    def test_epi_has_var_y_column(self):
+    def test_epi_has_trait_var_column(self):
         import sqlite3
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         cursor.execute("PRAGMA table_info(epi)")
         cols = {row[1] for row in cursor.fetchall()}
         conn.close()
-        self.assertIn('var_y', cols)
+        self.assertIn('trait_var', cols)
+        self.assertIn('trait_id', cols)
+        self.assertIn('trait_name', cols)
+        self.assertNotIn('var_y', cols)
+        self.assertNotIn('probe_id', cols)
+        self.assertNotIn('orientation', cols)
 
     def test_query_by_probe_id(self):
         associations = self.index.query_by_probe_id('ILMN_2349633')
         self.assertEqual(len(associations), 20)
-        self.assertTrue(all(a['probe_id'] == 'ILMN_2349633' for a in associations))
+        self.assertTrue(all(a['trait_id'] == 'ILMN_2349633' for a in associations))
 
     def test_query_by_snp_id(self):
         associations = self.index.query_by_snp_id('rs3818646')
@@ -324,7 +329,7 @@ class TestBESDQueryIndex(unittest.TestCase):
         )
         self.assertEqual(len(besd_results), len(index_results))
         self.assertEqual(besd_results[0]['snp_id'], index_results[0]['snp_id'])
-        self.assertEqual(besd_results[0]['probe_id'], index_results[0]['probe_id'])
+        self.assertEqual(besd_results[0]['trait_id'], index_results[0]['trait_id'])
         # beta: allow up to 0.1% relative error (float16 z-score quantisation)
         beta_ref = besd_results[0]['beta']
         self.assertLess(abs(index_results[0]['beta'] - beta_ref) / abs(beta_ref), 1e-3)
@@ -342,8 +347,8 @@ class TestBESDQueryIndex(unittest.TestCase):
         assocs2 = self.index.query_by_probe_id('ILMN_2112256')
         self.assertEqual(len(assocs1), 20)
         self.assertEqual(len(assocs2), 20)
-        probe_ids = {a['probe_id'] for a in assocs1 + assocs2}
-        self.assertEqual(len(probe_ids), 2)
+        trait_ids = {a['trait_id'] for a in assocs1 + assocs2}
+        self.assertEqual(len(trait_ids), 2)
 
     def test_gene_query_index(self):
         associations = self.index.query_by_gene('TNFRSF18')
@@ -356,8 +361,8 @@ class TestBESDQueryIndex(unittest.TestCase):
         besd_results = engine.query_by_snp_id('rs3818646')
         index_results = self.index.query_by_snp_id('rs3818646')
         self.assertEqual(len(besd_results), len(index_results))
-        besd_ids = {(a['snp_id'], a['probe_id']) for a in besd_results}
-        index_ids = {(a['snp_id'], a['probe_id']) for a in index_results}
+        besd_ids = {(a['snp_id'], a['trait_id']) for a in besd_results}
+        index_ids = {(a['snp_id'], a['trait_id']) for a in index_results}
         self.assertEqual(besd_ids, index_ids)
 
     def test_consistency_probe_query(self):
@@ -365,8 +370,8 @@ class TestBESDQueryIndex(unittest.TestCase):
         besd_results = engine.query_by_probe_id('ILMN_2349633')
         index_results = self.index.query_by_probe_id('ILMN_2349633')
         self.assertEqual(len(besd_results), len(index_results))
-        besd_ids = {(a['snp_id'], a['probe_id']) for a in besd_results}
-        index_ids = {(a['snp_id'], a['probe_id']) for a in index_results}
+        besd_ids = {(a['snp_id'], a['trait_id']) for a in besd_results}
+        index_ids = {(a['snp_id'], a['trait_id']) for a in index_results}
         self.assertEqual(besd_ids, index_ids)
 
     def test_consistency_gene_query(self):
@@ -374,8 +379,8 @@ class TestBESDQueryIndex(unittest.TestCase):
         besd_results = engine.query_by_gene('TNFRSF18')
         index_results = self.index.query_by_gene('TNFRSF18')
         self.assertEqual(len(besd_results), len(index_results))
-        besd_ids = {(a['snp_id'], a['probe_id']) for a in besd_results}
-        index_ids = {(a['snp_id'], a['probe_id']) for a in index_results}
+        besd_ids = {(a['snp_id'], a['trait_id']) for a in besd_results}
+        index_ids = {(a['snp_id'], a['trait_id']) for a in index_results}
         self.assertEqual(besd_ids, index_ids)
 
 

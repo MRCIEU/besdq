@@ -69,9 +69,9 @@ def write_output(associations: List[Dict], output_path: str, pval_threshold: flo
                 str(assoc['snp_bp']),
                 assoc['a1'] or 'NA',
                 assoc['a2'] or 'NA',
-                assoc['probe_id'],
-                str(assoc['probe_chr']),
-                str(assoc['probe_bp']),
+                assoc['trait_id'],
+                str(assoc['trait_chr']) if assoc['trait_chr'] is not None else 'NA',
+                str(assoc['trait_bp']) if assoc['trait_bp'] is not None else 'NA',
                 assoc['gene'] or 'NA',
                 f"{assoc['beta']:.6f}",
                 f"{assoc['se']:.6f}",
@@ -380,6 +380,93 @@ def main():
         if is_index:
             query_engine.close()
 
+
+
+def import_gwas_ssf_main() -> None:
+    """Entry point for import-gwas-ssf command."""
+    parser = argparse.ArgumentParser(
+        prog='import-gwas-ssf',
+        description='Import GWAS-SSF summary statistics into a queryable SQLite index',
+    )
+    parser.add_argument(
+        '--trait-annotation', required=True, dest='trait_annotation',
+        help='Path to trait annotation TSV file (required columns: file_path, trait_id, trait_name)',
+    )
+    parser.add_argument(
+        '--ld-reference', required=True, dest='ld_reference',
+        help='Prefix for plink2-format LD reference panel (--pfile prefix)',
+    )
+    parser.add_argument(
+        '--output', default=None,
+        help='Output SQLite database path (default: <annotation_tsv_stem>.db)',
+    )
+    parser.add_argument(
+        '--workers', type=int, default=1,
+        help='Number of parallel workers for Pass 1 (default: 1)',
+    )
+    parser.add_argument(
+        '--sig-threshold', type=float, default=5e-8, dest='sig_threshold',
+        help='Genome-wide significance threshold (default: 5e-8)',
+    )
+    parser.add_argument(
+        '--sug-threshold', type=float, default=1e-4, dest='sug_threshold',
+        help='Suggestive significance threshold (default: 1e-4)',
+    )
+    parser.add_argument(
+        '--cis-radius', type=int, default=1_000_000, dest='cis_radius',
+        help='Cis window radius in bp (default: 1000000)',
+    )
+    parser.add_argument(
+        '--sig-radius', type=int, default=500_000, dest='sig_radius',
+        help='Significant trans window radius in bp (default: 500000)',
+    )
+    parser.add_argument(
+        '--clump-r2', type=float, default=0.01, dest='clump_r2',
+        help='LD clumping r² threshold (default: 0.01)',
+    )
+    parser.add_argument(
+        '--clump-kb', type=int, default=10_000, dest='clump_kb',
+        help='LD clumping window in kb (default: 10000)',
+    )
+
+    args = parser.parse_args()
+
+    # Validate annotation file exists before starting processing
+    annotation_path = Path(args.trait_annotation)
+    if not annotation_path.exists():
+        print(f"Error: annotation file not found: {args.trait_annotation}", file=sys.stderr)
+        sys.exit(1)
+
+    # Determine output path
+    output_path = args.output or str(annotation_path.stem + '.db')
+
+    try:
+        from .annotation_reader import read_trait_annotation
+        from .gwas_ssf_builder import GwasSsfIndexBuilder
+
+        print(f"Reading trait annotations from: {args.trait_annotation}", file=sys.stderr)
+        traits = read_trait_annotation(args.trait_annotation)
+        print(f"  {len(traits)} traits found", file=sys.stderr)
+
+        builder = GwasSsfIndexBuilder(output_path)
+        builder.build(
+            traits,
+            workers=args.workers,
+            cis_radius=args.cis_radius,
+            sig_threshold=args.sig_threshold,
+            sug_threshold=args.sug_threshold,
+            plink2_pfile=args.ld_reference,
+            sig_radius=args.sig_radius,
+            clump_r2=args.clump_r2,
+            clump_kb=args.clump_kb,
+        )
+        print(f"Index written to: {output_path}", file=sys.stderr)
+
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
 
 
 if __name__ == '__main__':
