@@ -23,3 +23,8 @@ packages = ["besdq"]
 [project.scripts]
 besdq = "besdq.cli:main"
 import-gwas-ssf = "besdq.cli:import_gwas_ssf_main"
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: requires plink2 and BESDQ_LD_REF environment variable",
+]

@@ -403,5 +403,140 @@ class TestGwasSsfEndToEnd(unittest.TestCase):
         self.assertEqual(cm.exception.code, 1)
 
 
+# ---------------------------------------------------------------------------
+# Determinism: workers=1 produces the same ESI as repeated runs
+# ---------------------------------------------------------------------------
+
+class TestBuilderDeterminism(unittest.TestCase):
+    """Deterministic output regardless of execution context."""
+
+    def test_esi_sorted_by_chr_then_bp(self):
+        """ESI rows are sorted in the same order as the builder's snp_sort_key."""
+        if not TRAITS_TSV.exists():
+            self.skipTest("traits.tsv not found")
+        from besdq.annotation_reader import read_trait_annotation
+        from besdq.gwas_ssf_builder import GwasSsfIndexBuilder, _snp_sort_key
+        import sqlite3
+
+        traits = read_trait_annotation(str(TRAITS_TSV))
+        with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as f:
+            db_path = f.name
+        try:
+            GwasSsfIndexBuilder(db_path).build(traits, workers=1, plink2_pfile=None)
+            conn = sqlite3.connect(db_path)
+            # Fetch rows with their snp_id (which contains the full snp_key) in row_idx order
+            rows = conn.execute(
+                "SELECT chr, bp, a1, a2 FROM esi ORDER BY row_idx"
+            ).fetchall()
+            conn.close()
+
+            # Reconstruct snp_keys from the rows and verify monotone sort order
+            def row_sort_key(r):
+                chr_str, bp, a1, a2 = r
+                snp_key = f"{chr_str}:{bp}:{a1 or ''}:{a2 or ''}"
+                return _snp_sort_key(snp_key)
+
+            for i in range(1, len(rows)):
+                self.assertLessEqual(
+                    row_sort_key(rows[i - 1]), row_sort_key(rows[i]),
+                    f"ESI not sorted at rows {i-1} and {i}: {rows[i-1]} vs {rows[i]}"
+                )
+        finally:
+            Path(db_path).unlink(missing_ok=True)
+
+    def test_empty_trait_produces_zero_snp_count(self):
+        """A trait with no rows passing the filter writes snp_count=0."""
+        import gzip as gz
+        import sqlite3
+        from besdq.annotation_reader import TraitConfig
+        from besdq.gwas_ssf_builder import GwasSsfIndexBuilder
+
+        # Write a minimal gz file with one row that won't pass any filter
+        with tempfile.NamedTemporaryFile(suffix='.tsv.gz', delete=False) as f:
+            gz_path = f.name
+        with gz.open(gz_path, 'wt') as gz_fh:
+            gz_fh.write(
+                'chromosome\tbase_pair_location\teffect_allele\tother_allele\t'
+                'beta\tstandard_error\teffect_allele_frequency\tp_value\trsid\n'
+            )
+            # p=0.5 → below suggestive threshold → dropped
+            gz_fh.write('1\t1000000\tA\tG\t0.01\t0.1\t0.3\t0.5\tNA\n')
+
+        trait = TraitConfig(
+            file_path=gz_path, trait_id='T1', trait_name='Test',
+            trait_chr=None, trait_bp=None, sample_size=100,
+            trait_var=1.0, gene=None, context=None, study_metadata={},
+        )
+        with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as f:
+            db_path = f.name
+        try:
+            GwasSsfIndexBuilder(db_path).build([trait], plink2_pfile=None)
+            conn = sqlite3.connect(db_path)
+            count = conn.execute(
+                "SELECT snp_count FROM probe_data WHERE probe_idx = 0"
+            ).fetchone()[0]
+            conn.close()
+            self.assertEqual(count, 0)
+        finally:
+            Path(gz_path).unlink(missing_ok=True)
+            Path(db_path).unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# Integration test (requires plink2 + real LD reference; skipped by default)
+# ---------------------------------------------------------------------------
+
+import pytest
+
+
+@pytest.mark.integration
+class TestGwasSsfIntegration(unittest.TestCase):
+    """Full pipeline test with real LD reference data.
+
+    Run with: pytest -m integration --ld-ref /path/to/plink2/ref
+    These tests are skipped unless plink2 is installed and an LD reference
+    is provided via the BESDQ_LD_REF environment variable.
+    """
+
+    def _get_ld_ref(self):
+        import os
+        import shutil
+        if shutil.which('plink2') is None:
+            self.skipTest("plink2 not on PATH")
+        ld_ref = os.environ.get('BESDQ_LD_REF')
+        if not ld_ref:
+            self.skipTest("BESDQ_LD_REF environment variable not set")
+        return ld_ref
+
+    def test_clumping_reduces_sig_trans_count(self):
+        """LD clumping should not increase the candidate count."""
+        ld_ref = self._get_ld_ref()
+        if not TRAITS_TSV.exists():
+            self.skipTest("traits.tsv not found")
+        from besdq.annotation_reader import read_trait_annotation
+        from besdq.gwas_ssf_builder import GwasSsfIndexBuilder
+        import sqlite3
+
+        traits = read_trait_annotation(str(TRAITS_TSV))
+        with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as f:
+            db_no_clump = f.name
+        with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as f:
+            db_with_clump = f.name
+        try:
+            GwasSsfIndexBuilder(db_no_clump).build(traits, plink2_pfile=None)
+            GwasSsfIndexBuilder(db_with_clump).build(traits, plink2_pfile=ld_ref)
+            conn_no = sqlite3.connect(db_no_clump)
+            conn_cl = sqlite3.connect(db_with_clump)
+            n_no = conn_no.execute("SELECT COUNT(*) FROM esi").fetchone()[0]
+            n_cl = conn_cl.execute("SELECT COUNT(*) FROM esi").fetchone()[0]
+            conn_no.close()
+            conn_cl.close()
+            # Clumping can only reduce or maintain SNP count
+            self.assertLessEqual(n_cl, n_no)
+        finally:
+            Path(db_no_clump).unlink(missing_ok=True)
+            Path(db_with_clump).unlink(missing_ok=True)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
