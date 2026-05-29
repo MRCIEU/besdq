@@ -78,7 +78,7 @@ Optional columns:
 ### 2. Run the import
 
 ```bash
-import-gwas-ssf \
+time import-gwas-ssf \
   --trait-annotation data/ebi_input/traits.tsv \
   --ld-reference data/ldref/EUR \
   --output data/ebi_input/study.db

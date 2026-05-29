@@ -33,7 +33,7 @@ def _pass1_worker(args: tuple) -> _TraitResult:
         file_path, trait_id, trait_name, trait_chr, trait_bp,
         sample_size, trait_var, gene, context, study_metadata,
         cis_radius, sig_threshold, sug_threshold, plink2_pfile,
-        sig_radius, clump_r2, clump_kb,
+        sig_radius, clump_r2, clump_kb, force_fallback,
     ) = args
 
     trait = TraitConfig(
@@ -63,6 +63,7 @@ def _pass1_worker(args: tuple) -> _TraitResult:
         cis_start=cis_start,
         cis_end=cis_end,
         p_threshold=sug_threshold,
+        force_fallback=force_fallback,
     ))
 
     filter_result = apply_significance_filter(
@@ -153,6 +154,7 @@ class GwasSsfIndexBuilder:
         sig_radius: int = 500_000,
         clump_r2: float = 0.01,
         clump_kb: int = 10_000,
+        force_fallback: bool = False,
     ) -> None:
         """Build the index database from annotation-driven trait configs."""
         if self.db_path.exists():
@@ -165,7 +167,7 @@ class GwasSsfIndexBuilder:
                 t.file_path, t.trait_id, t.trait_name, t.trait_chr, t.trait_bp,
                 t.sample_size, t.trait_var, t.gene, t.context, t.study_metadata,
                 cis_radius, sig_threshold, sug_threshold, plink2_pfile,
-                sig_radius, clump_r2, clump_kb,
+                sig_radius, clump_r2, clump_kb, force_fallback,
             )
             for t in traits
         ]

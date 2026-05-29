@@ -430,8 +430,22 @@ def import_gwas_ssf_main() -> None:
         '--clump-kb', type=int, default=10_000, dest='clump_kb',
         help='LD clumping window in kb (default: 10000)',
     )
+    parser.add_argument(
+        '--force-fallback', action='store_true', dest='force_fallback',
+        help='Always use Python streaming reader instead of the pytabix+awk fast path',
+    )
 
     args = parser.parse_args()
+
+    # Route besdq.gwas_ssf_fast_reader INFO messages to stderr so the user can
+    # see which read path is selected for each file.
+    import logging as _logging
+    _logging.basicConfig(
+        level=_logging.INFO,
+        format='[%(asctime)s] %(message)s',
+        datefmt='%H:%M:%S',
+        stream=sys.stderr,
+    )
 
     # Validate annotation file exists before starting processing
     annotation_path = Path(args.trait_annotation)
@@ -461,6 +475,7 @@ def import_gwas_ssf_main() -> None:
             sig_radius=args.sig_radius,
             clump_r2=args.clump_r2,
             clump_kb=args.clump_kb,
+            force_fallback=args.force_fallback,
         )
         print(f"Index written to: {output_path}", file=sys.stderr)
 
