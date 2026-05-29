@@ -6,6 +6,10 @@ Fast queries of BESD (Binary Efficient Sequential Data) eQTL summary statistics 
 
 This work builds on the BESD format designed and implemented in the [SMR software](https://yanglab.westlake.edu.cn/software/smr/#eQTLsummarydata) from [Jian Yang's group](https://yanglab.westlake.edu.cn/).
 
+## Understanding BESD
+
+See [SKILLS.md](.claude/SKILLS.md).
+
 ## Installation
 
 ### From GitHub (Recommended)
