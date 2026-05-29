@@ -47,6 +47,92 @@ python3 -m besdq.cli --help
 - ~1GB free disk space per BESD dataset
 - ~50-70% additional space for SQLite index databases (optional but recommended)
 
+## Building an Index from GWAS-SSF Files (EBI GWAS Catalog)
+
+If you have summary statistics in [GWAS-SSF format](https://www.ebi.ac.uk/gwas/docs/summary-statistics-format) (e.g. downloaded from the EBI GWAS Catalog), use the `import-gwas-ssf` command to build a queryable index directly — no intermediate conversion required.
+
+### 1. Prepare a trait annotation file
+
+Create a tab-separated file (e.g. `traits.tsv`) with one row per summary-statistics file. Required columns are `file_path`, `trait_id`, and `trait_name`. Provide `trait_chr`/`trait_bp` to enable cis-region storage; omit them for trans-only mode.
+
+```
+file_path	trait_id	trait_name	trait_chr	trait_bp	gene	context
+data/GCST90275731.h.tsv.gz	GCST90275731	IL10 expression PBMC Bbmix 1e-5	1	206774541	IL10	PBMC_Bbmix_baseline
+data/GCST90275739.h.tsv.gz	GCST90275739	IL1Ra expression PBMC Bbmix 1e-4	2	113099315	IL1RN	PBMC_Bbmix_baseline
+```
+
+If `sample_size` is omitted from the TSV, it is read automatically from the companion `*-meta.yaml` file that the EBI GWAS Catalog provides alongside each summary-statistics file.
+
+Optional columns:
+
+| Column | Default | Description |
+|---|---|---|
+| `trait_chr` | — | Chromosome of the trait locus (enables cis storage) |
+| `trait_bp` | — | Base-pair position of the trait locus |
+| `sample_size` | from YAML | Scalar sample size N |
+| `trait_var` | 1.0 | Phenotype variance (for reconstruction) |
+| `gene` | — | Gene symbol |
+| `context` | — | Free-text experimental context |
+
+### 2. Run the import
+
+```bash
+import-gwas-ssf \
+  --trait-annotation traits.tsv \
+  --ld-reference data/ld_ref/1kg_eur \
+  --output study.db
+```
+
+**Significance filtering applied during import:**
+
+| Tier | Condition | Stored |
+|---|---|---|
+| Cis | SNP within ±1 Mb of `trait_chr`/`trait_bp` | All variants |
+| Significant trans | p < 5×10⁻⁸, different chromosome | ±500 kb window around each independent peak (LD-clumped) |
+| Suggestive trans | 5×10⁻⁸ ≤ p < 1×10⁻⁴ | That variant only |
+| Below suggestive | p ≥ 1×10⁻⁴ | Dropped |
+
+LD clumping requires [plink2](https://www.cog-genomics.org/plink/2.0/) on `PATH` and a plink2-format reference panel (`--ld-reference` prefix). Install plink2 with:
+
+```bash
+conda install -c bioconda plink2
+```
+
+**Key options:**
+
+```
+--trait-annotation FILE   Trait annotation TSV (required)
+--ld-reference PREFIX     plink2 LD reference prefix (required)
+--output FILE             Output database (default: <tsv_stem>.db)
+--workers N               Parallel workers for Pass 1 (default: 1)
+--cis-radius BP           Cis window radius (default: 1000000)
+--sig-threshold P         Genome-wide significance (default: 5e-8)
+--sug-threshold P         Suggestive threshold (default: 1e-4)
+--sig-radius BP           Trans peak window radius (default: 500000)
+--clump-r2 R2             LD clumping r² threshold (default: 0.01)
+--clump-kb KB             LD clumping window (default: 10000)
+```
+
+### 3. Query the resulting index
+
+Once built, the index is queried with the standard `besdq` tool:
+
+```bash
+# Query by SNP
+besdq --besd-index study.db --snp rs12238997 --out results/out
+
+# Query by trait ID
+besdq --besd-index study.db --probe GCST90275731 --out results/out
+
+# Query by genomic region
+besdq --besd-index study.db \
+  --snp-chrpos 1:206000000-208000000 \
+  --probe-chrpos 1:205000000-208000000 \
+  --out results/out
+```
+
+---
+
 ## Basic Usage
 
 ### Two Query Options
@@ -173,9 +259,9 @@ associations = engine.query_cis_window(
     probe_chr='1', probe_start_kb=1000, probe_end_kb=2000,
 )
 
-# Results include SNP/probe metadata and statistics
+# Results include SNP/trait metadata and statistics
 for assoc in associations:
-    print(f"{assoc['snp_id']} - {assoc['probe_id']}: "
+    print(f"{assoc['snp_id']} - {assoc['trait_id']}: "
           f"beta={assoc['beta']:.4f}, p={assoc['pval']:.2e}")
 ```
 
