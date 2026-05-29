@@ -65,8 +65,13 @@ def _load_yaml_meta(yaml_path: Path) -> dict:
 
 
 def _yaml_sample_size(yaml_path: Path) -> Optional[int]:
-    if not yaml_path.exists() or not _YAML_AVAILABLE:
+    if not yaml_path.exists():
         return None
+    if not _YAML_AVAILABLE:
+        raise ImportError(
+            "PyYAML is required to read sample_size from YAML metadata files. "
+            "Install it with: pip install PyYAML"
+        )
     with open(yaml_path, 'r') as fh:
         data = yaml.safe_load(fh) or {}
     samples = data.get('samples', [])
