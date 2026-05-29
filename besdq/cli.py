@@ -103,8 +103,8 @@ def main():
                         help='Scalar sample size N used for --n-mode scalar. If omitted and ESI has allele frequencies, n is computed from the data.')
     parser.add_argument('--trait-variance', default=None, dest='trait_variance',
                         help='Two-column TSV (probe_id  var_y) supplying per-probe trait variance. Probes absent from the file default to var_y=1.0.')
-    parser.add_argument('--query', type=float, default=0.05,
-                        help='P-value threshold for filtering results')
+    parser.add_argument('--query', type=float, default=1.0,
+                        help='P-value threshold for filtering results (default: 1.0, i.e. no filter)')
     parser.add_argument('--snp-chr',
                         help='SNP chromosome')
     parser.add_argument('--from-snp-kb', type=float,

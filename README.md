@@ -37,6 +37,7 @@ python3 -m besdq.cli --help
 **Required:**
 - Python 3.9+
 - numpy>=1.20 (for efficient array storage in database indices)
+- PyYAML>=5.1 (for reading EBI GWAS Catalog metadata files)
 
 **Development (optional):**
 - black>=22.0 (code formatting)
@@ -78,9 +79,9 @@ Optional columns:
 
 ```bash
 import-gwas-ssf \
-  --trait-annotation traits.tsv \
-  --ld-reference data/ld_ref/1kg_eur \
-  --output study.db
+  --trait-annotation data/ebi_input/traits.tsv \
+  --ld-reference data/ldref/EUR \
+  --output data/ebi_import/study.db
 ```
 
 **Significance filtering applied during import:**
