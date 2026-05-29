@@ -3,6 +3,8 @@
 ## Project Overview
 `besdq` is a Python library for fast queries of BESD (Binary Efficient Sequential Data) eQTL summary statistics. It provides dual query modes: direct BESD file access and optimized SQLite indexing for repeated queries.
 
+NOTE: The term `probe` may be generalised to `trait`.
+
 ## Architecture
 
 ### Hybrid Storage Design
@@ -44,36 +46,71 @@ CREATE TABLE besd_meta (
 ## BESD File Format (Sparse)
 
 ### Magic Numbers
-- **Sparse**: `0x3f800000` or `3` (SPARSE_FILE_TYPE_3/3F)
-- **Dense**: `0x40000000` (not supported)
+- **Sparse**: `0x40400000` or `3` (SPARSE_FILE_TYPE_3F / SPARSE_FILE_TYPE_3)
+- **Dense**: Not supported by this parser implementation
+
+Source: [SMR source code](https://yanglab.westlake.edu.cn/software/smr/#Sourcecode) `src/CommFunc.hpp`
 
 ### File Structure
-```
-[uint32 magic]
-[uint32 reserved]
-[uint32 N_probes]
-[uint32 N_snps]
-[N_probes × 2 × uint64 offset_pairs]  -- start/end byte offsets for each probe
-[probe_blocks...]
-```
+- [uint32 magic]
+  - The magin number indicating file type, as stated above
+- [15 x uint32 reserved]
+  - Only present in type 3 but not 3F
+- [uint64 val_num]
+  - Number of values
+- [uint64 cols[2 * n_probes + 1]]
+  - Boundaries of list of values of each probe
+- [uint32 rowid[val_num]]
+  - SNP IDs that the value in the list belongs to
+- [float32 val[val_num]]
+  - Blocks of values
 
-### Per-Probe Block Format
-Each probe block contains (in order):
-1. Array of uint32 SNP indices (colNum values)
-2. Array of float32 betas (one per SNP)
-3. Array of float32 SEs (one per SNP)
+### Illustrative Example (type 3 and 3F)
 
-**Critical Detail**: `valNum` = 2 × (number of significant SNP-probe pairs) because it counts both betas AND SEs combined.
+|      | probe0<br>beta | probe0<br>se | probe1<br>beta | probe1<br>se |
+| ---- | -------------- | ------------ | -------------- | ------------ |
+| snp0 | 0.2            | 0.05         |                |              |
+| snp1 |                |              | 0.3            | 0.07         |
+| snp2 | -0.1           | 0.04         |                |              |
+
+Reformat - read by columns left-right then rows top-bottom:
+
+| index | 0    | 1    | 2    | 3    | 4    | 5    |
+| ----- | ---- | ---- | ---- | ---- | ---- | ---- |
+| value | 0.2  | -0.1 | 0.05 | 0.04 | 0.3  | 0.07 |
+| probe | 0    | 0    | 0    | 0    | 1    | 1    |
+| field | beta | beta | se   | se   | beta | se   |
+| snp   | 0    | 2    | 0    | 2    | 1    | 1    |
+
+- `val_num = 6`
+  - There are six values
+- `cols[5] = [0, 2, 4, 5, 6]`
+  - Column (field) boundaries are `[0, 2)` `[2, 4)` `[4, 4)` `[5, 5)` and `6`
+- `row_id[6] = [0, 2, 0, 2, 1, 1]`
+  - SNP IDs
+- `val[6] = [0.2, -0.1, 0.05, 0.04, 0.3, 0.07]`
+
+### Reconstruct from BESD
+The `i`-th association of the `p`-th probe can be reconstructed from global arrays using `cols` boundaries:
+1. `beta_start = cols[2p]`
+2. `se_start = cols[2p+1]`
+3. `association_count = beta_start - se_start`
+4. `snp_idx(i) = rowid[beta_start + i]`
+5. `beta(i) = val[beta_start + i]`
+6. `se(i) = val[se_start + i]`
+
+**Critical Detail**: `val_num` is the global payload length used to read `rowid` and `val` arrays; per-probe association counts are derived from `cols` boundaries.
 
 ### Row Indexing
-- ESI/EPI row order must be preserved exactly — indices are baked into BESD offset tables
-- All coordinates are 1-indexed (BESD convention)
+- ESI/EPI row order must be preserved exactly
+- `row_idx` is zero-based in this codebase and assigned by row order in index readers
+- Genomic bp values are consumed as provided by the source index files
 
 ## Query Modes
 
 ### 1. Direct BESD File Queries (`BESDQueryEngine`)
 - **Speed**: ~100-200ms per query
-- **Memory**: Indices loaded, data streamed
+- **Memory**: Indices and BESD arrays are loaded during reader initialization
 - **Use Case**: One-time queries, exploratory analysis
 - **No Setup**: Works immediately on BESD files
 
@@ -187,12 +224,12 @@ python3 -m unittest tests.test_queries -v
 
 ## Performance Characteristics
 
-| Metric | Direct BESD | SQLite Index |
-|--------|-------------|-------------|
-| Query time | 100-200ms | 10-50ms |
-| Index creation | N/A | ~2s |
-| File size | ~1.2GB | ~400-600MB |
-| Memory | ~500MB | ~100MB |
+| Metric         | Direct BESD | SQLite Index |
+| -------------- | ----------- | ------------ |
+| Query time     | 100-200ms   | 10-50ms      |
+| Index creation | N/A         | ~2s          |
+| File size      | ~1.2GB      | ~400-600MB   |
+| Memory         | ~500MB      | ~100MB       |
 
 ## Error Handling & Edge Cases
 
