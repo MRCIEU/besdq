@@ -49,7 +49,7 @@ CREATE TABLE besd_meta (
 - **Sparse**: `0x40400000` or `3` (SPARSE_FILE_TYPE_3F / SPARSE_FILE_TYPE_3)
 - **Dense**: Not supported by this parser implementation
 
-Source: [SMR source code](https://yanglab.westlake.edu.cn/software/smr/#Sourcecode) `src/CommFunc.hpp`
+Source: [SMR source code](https://yanglab.westlake.edu.cn/software/smr/#Sourcecode) `src/SMR_data_p1.cpp`
 
 ### File Structure
 - [uint32 magic]
