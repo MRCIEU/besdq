@@ -105,6 +105,8 @@ def main():
                         help='Two-column TSV (probe_id  var_y) supplying per-probe trait variance. Probes absent from the file default to var_y=1.0.')
     parser.add_argument('--query', type=float, default=1.0,
                         help='P-value threshold for filtering results (default: 1.0, i.e. no filter)')
+    parser.add_argument('--original-scale', action='store_true', dest='original_scale',
+                        help='Return beta and SE in original study units instead of SD units (default: SD units)')
     parser.add_argument('--snp-chr',
                         help='SNP chromosome')
     parser.add_argument('--from-snp-kb', type=float,
@@ -171,7 +173,7 @@ def main():
     # Determine data source
     if args.besd_index:
         print(f"Using SQLite index: {args.besd_index}")
-        query_engine = BESDQueryIndex(args.besd_index)
+        query_engine = BESDQueryIndex(args.besd_index, original_scale=args.original_scale)
         is_index = True
     else:
         print(f"Using BESD files: {args.beqtl_summary}")

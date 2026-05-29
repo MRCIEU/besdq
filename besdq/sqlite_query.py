@@ -43,11 +43,12 @@ def calculate_p_value(beta: float, se: float) -> float:
 class BESDQueryIndex:
     """Query BESD data from SQLite index database."""
 
-    def __init__(self, db_path: str):
+    def __init__(self, db_path: str, original_scale: bool = False):
         self.db_path = Path(db_path)
         if not self.db_path.exists():
             raise FileNotFoundError(f"Database not found: {db_path}")
 
+        self.original_scale = original_scale
         self.conn = sqlite3.connect(str(self.db_path))
         self.conn.row_factory = sqlite3.Row
         self._load_metadata()
@@ -125,17 +126,29 @@ class BESDQueryIndex:
         snp_indices = np.frombuffer(row['snp_indices'], dtype=np.int32)
         zscores = np.frombuffer(row['zscores'], dtype=np.float16).astype(np.float64)
 
+        trait_var = row['trait_var']  # may be None
+
         if row['se_vector'] is not None:
-            # Vector mode: SE stored directly; beta = z * se, no AF needed
+            # VectorN mode: SE stored directly in original units
             ses = np.frombuffer(row['se_vector'], dtype=np.float16).astype(np.float64)
+            if not self.original_scale and trait_var is not None and trait_var > 0:
+                sd_y = math.sqrt(trait_var)
+                ses = ses / sd_y
+            elif not self.original_scale and trait_var is None:
+                import warnings
+                warnings.warn(
+                    f"trait_var not set for probe_idx={probe_idx}; "
+                    "returning original-unit values. Supply trait_var in annotation TSV "
+                    "or ensure cis SNPs are present for auto-estimation.",
+                    stacklevel=3,
+                )
             betas = zscores * ses
             return snp_indices, betas, ses
 
-        # Scalar mode: reconstruct SE from n + AF + trait_var
+        # ScalarN mode: reconstruct SE from n + AF + trait_var
         if row['n_scalar'] is None:
             raise ValueError(f"No n_scalar or se_vector for probe_idx={probe_idx}")
 
-        var_y = row['trait_var'] if row['trait_var'] is not None else 1.0
         n = float(row['n_scalar'])
 
         snp_list = [int(i) for i in snp_indices]
@@ -150,7 +163,20 @@ class BESDQueryIndex:
             dtype=np.float64,
         )
 
-        betas, ses = _reconstruct_beta_se(zscores, af_array, n, var_y=var_y)
+        if self.original_scale:
+            # Return in original units — need trait_var to reconstruct original SE
+            var_y = trait_var if trait_var is not None else 1.0
+            betas, ses = _reconstruct_beta_se(zscores, af_array, n, var_y=var_y)
+        else:
+            # SD-unit SE: trait_var cancels → se_sd = 1 / sqrt(n × 2 × AF × (1-AF))
+            with np.errstate(invalid='ignore', divide='ignore'):
+                ses = np.where(
+                    (af_array > 0) & (af_array < 1),
+                    1.0 / np.sqrt(n * 2.0 * af_array * (1.0 - af_array)),
+                    np.nan,
+                )
+            betas = zscores * ses
+
         return snp_indices, betas, ses
 
     # ------------------------------------------------------------------

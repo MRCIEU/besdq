@@ -20,8 +20,10 @@ class _TraitResult:
     """Intermediate result from Pass 1 for one trait."""
     trait: TraitConfig
     rows: List[GwasSsfRow] = field(default_factory=list)
+    cis_rows: List[GwasSsfRow] = field(default_factory=list)
     n_total_read: int = 0
     n_retained: int = 0
+    estimated_trait_var: Optional[float] = None
 
 
 def _pass1_worker(args: tuple) -> _TraitResult:
@@ -59,7 +61,8 @@ def _pass1_worker(args: tuple) -> _TraitResult:
         sug_threshold=sug_threshold,
     )
 
-    retained = list(filter_result.cis) + list(filter_result.sug_trans)
+    cis_rows = list(filter_result.cis)
+    retained = cis_rows + list(filter_result.sug_trans)
 
     # LD clumping for significant trans candidates
     if filter_result.sig_trans_candidates and plink2_pfile:
@@ -91,7 +94,20 @@ def _pass1_worker(args: tuple) -> _TraitResult:
             deduped.append(row)
 
     result.rows = deduped
+    result.cis_rows = cis_rows
     result.n_retained = len(deduped)
+
+    # Estimate trait_var from cis SNPs: median(se^2 * n * 2 * eaf * (1-eaf))
+    if cis_rows and sample_size:
+        ses_arr = np.array([r.se for r in cis_rows], dtype=np.float64)
+        eafs_arr = np.array([r.eaf for r in cis_rows], dtype=np.float64)
+        valid = (eafs_arr > 0.01) & (eafs_arr < 0.99) & (ses_arr > 0)
+        if valid.sum() >= 10:
+            result.estimated_trait_var = float(
+                np.median(ses_arr[valid] ** 2 * sample_size * 2
+                          * eafs_arr[valid] * (1.0 - eafs_arr[valid]))
+            )
+
     return result
 
 
@@ -205,13 +221,20 @@ class GwasSsfIndexBuilder:
             r = trait_results.get(tid)
             rows = r.rows if r else []
 
+            # Resolve trait_var: user-supplied > estimated from cis SNPs > None
+            resolved_trait_var = trait_cfg.trait_var
+            if resolved_trait_var is None and r is not None:
+                resolved_trait_var = r.estimated_trait_var
+            if resolved_trait_var is None:
+                _log(f"  WARNING: no trait_var for {tid} — queries will return original units")
+
             cursor.execute(
                 "INSERT INTO epi (row_idx, trait_id, trait_name, trait_chr, trait_bp, "
                 "trait_var, gene, context) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     epi_idx, trait_cfg.trait_id, trait_cfg.trait_name,
                     trait_cfg.trait_chr, trait_cfg.trait_bp,
-                    trait_cfg.trait_var if trait_cfg.trait_var != 1.0 else None,
+                    resolved_trait_var,
                     trait_cfg.gene, trait_cfg.context,
                 ),
             )
@@ -224,9 +247,14 @@ class GwasSsfIndexBuilder:
                     [row.beta / row.se if row.se > 0 else 0.0 for row in rows],
                     dtype=np.float64,
                 ).astype(np.float16)
+                # VectorN: store SE directly (original units, float16)
+                se_vector = np.array(
+                    [row.se for row in rows], dtype=np.float64
+                ).astype(np.float16)
             else:
                 snp_indices = np.array([], dtype=np.int32)
                 zscores = np.array([], dtype=np.float16)
+                se_vector = np.array([], dtype=np.float16)
 
             cursor.execute(
                 "INSERT INTO probe_data (probe_idx, snp_count, snp_indices, zscores, "
@@ -234,7 +262,7 @@ class GwasSsfIndexBuilder:
                 (
                     epi_idx, len(rows),
                     snp_indices.tobytes(), zscores.tobytes(),
-                    trait_cfg.sample_size, None,
+                    None, se_vector.tobytes(),
                 ),
             )
 

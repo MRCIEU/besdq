@@ -30,14 +30,20 @@ ESI deduplication uses `chr:pos:A1:A2` as the unique SNP key. The rsid is stored
 
 ## Statistics Encoding
 
-The representation used in `probe_data` BLOBs. Two modes:
+The representation used in `probe_data` BLOBs. Two modes, selected by data source:
 
-One format only: **z-score encoding**. Stores float16 `zscores` per SNP-trait pair and `n` (scalar per trait in ScalarN mode, float16 BLOB per pair in VectorN mode). Reconstructs beta and se on the fly at query time. No verbatim encoding path.
+**VectorN mode** (default for GWAS-SSF and any source that provides SE directly): stores `zscores` (float16) + `se_vector` (float16, SE in original study units) per SNP-trait pair. No AF or n needed at query time. SE is stored in original units and divided by `sd_y = sqrt(trait_var)` at query time to produce SD-unit output.
 
-**Schema changes for z-score encoding:**
-- `probe_data` table: `betas`/`ses` (float32 BLOBs) replaced by `zscores` (float16 BLOB); gains `n_scalar INTEGER` (ScalarN mode) and `n_vector BLOB` (VectorN mode, float16 array aligned to `snp_indices`)
-- `epi` table: mandatory `trait_id TEXT`, `trait_name TEXT`; optional functional `trait_var REAL` (default 1), `trait_chr TEXT`, `trait_bp INTEGER`; optional non-consequential stored as JSON in `metadata TEXT`
-- `esi` table: `freq` column populated during build if absent in source (derived from beta, se, user-supplied n)
+**ScalarN mode** (legacy BESD imports): stores `zscores` (float16) per pair + `n_scalar INTEGER` per trait. SE is reconstructed from n, AF, and trait_var. SD-unit SE simplifies to `1 / sqrt(n × 2 × AF × (1−AF))` — trait_var cancels.
+
+**`probe_data` schema:**
+- `zscores BLOB` — float16 numpy array, always present
+- `se_vector BLOB` — float16 numpy array, VectorN only (NULL in ScalarN)
+- `n_scalar INTEGER` — ScalarN only (NULL in VectorN)
+
+**`epi` schema:** mandatory `trait_id TEXT`, `trait_name TEXT`; optional functional `trait_var REAL`, `trait_chr TEXT`, `trait_bp INTEGER`; optional non-consequential `gene TEXT`, `context TEXT`.
+
+**`esi` schema:** `freq` column populated during build if absent in source (derived from beta, se, user-supplied n in ScalarN mode).
 
 ## Z-Score
 
@@ -45,25 +51,49 @@ One format only: **z-score encoding**. Stores float16 `zscores` per SNP-trait pa
 
 ## Reconstruction
 
-The process of deriving beta and se from stored quantities at query time. Formula:
+The process of deriving output beta and se from stored quantities at query time. Default output is **SD units** (see Output Scale). Two paths:
 
+**VectorN path** (GWAS-SSF imports):
 ```
-se  = sqrt(var_y / (n × 2 × AF × (1 − AF)))
-beta = z × se
+se_out  = se_stored / sd_y        # sd_y = sqrt(trait_var) from EPI
+beta_out = z × se_out
 ```
+Requires: z (stored), se_stored (stored), sd_y from EPI `trait_var`.
 
-Requires: z (stored per pair), n (stored per probe or per pair), AF (stored in ESI), var_y (stored per probe in EPI, default 1).
+**ScalarN path** (legacy BESD imports):
+```
+se_orig = sqrt(trait_var / (n × 2 × AF × (1 − AF)))
+se_out  = se_orig / sd_y = 1 / sqrt(n × 2 × AF × (1 − AF))   # trait_var cancels
+beta_out = z × se_out
+```
+Requires: z (stored), n (stored), AF (stored in ESI). `trait_var` cancels — SD-unit SE is independent of phenotype scale.
+
+With `--original-scale`: `se_out = se_stored` (VectorN) or `se_out = se_orig` (ScalarN); no division by sd_y.
 
 ## N (Sample Size)
 
-The number of individuals used to compute each association. May be stored as a **scalar** (one value per probe, ScalarN mode) or a **vector** (one value per SNP-probe pair, VectorN mode).
+The number of individuals used to compute each association.
 
-- **ScalarN mode**: n is constant across all SNPs for a probe (typical single-cohort eQTL datasets). Stored once per probe in `probe_data` as a single INTEGER. Supplied by the user via `--sample-size N`. Selected explicitly via `--n-mode scalar`.
-- **VectorN mode**: n varies per SNP-probe pair (meta-analyses such as eQTLgen, GoDMC). Stored as a float16 BLOB per probe in `probe_data`, aligned to `snp_indices`. Selected explicitly by the user via `--n-mode vector`. Requires AF to be present in ESI.
+- **ScalarN mode**: n is constant across all SNPs for a trait (typical single-cohort BESD eQTL datasets). Stored once per trait in `probe_data` as `n_scalar INTEGER`. Supplied by the user via `--sample-size N` or read from YAML.
+- **VectorN mode**: SE is stored directly per SNP-trait pair (GWAS-SSF imports and any source that provides SE). n is not stored. `se_vector BLOB` (float16) aligned to `snp_indices`.
 
 ## Trait Variance (trait_var)
 
-Variance of the phenotype (e.g. gene expression level) for a trait. Per-trait quantity. Stored in the `epi` SQLite table as `trait_var REAL`. When absent, assumed to be 1 with a build-time warning. Needed for exact reconstruction when phenotypes are not standardised. Previously named `var_y`.
+Variance of the phenotype (e.g. gene expression level) for a trait. Per-trait quantity stored in `epi.trait_var REAL`. Used to compute `sd_y = sqrt(trait_var)` for SD-unit output.
+
+**Sources, in precedence order:**
+1. User-supplied in annotation TSV `trait_var` column (exact)
+2. Auto-estimated at build time from cis SNPs using the median formula:
+   `trait_var = median( se_i² × n × 2 × eaf_i × (1 − eaf_i) )` over all cis SNPs
+3. 1.0 if no cis SNPs and not user-supplied — output is returned in original units with a warning
+
+Auto-estimation is robust to per-SNP missing data (median estimator) and approximately correct under covariate adjustment (effective-n error ≈ k/n, typically < 1%). Previously named `var_y`.
+
+## Output Scale
+
+All query methods return beta and SE in **SD units** (standard deviation of the trait) by default, making effect sizes directly comparable across studies and traits. Pass `--original-scale` to return beta and SE in original study units.
+
+SD-unit conversion: `beta_sd = beta_orig / sd_y`, `se_sd = se_orig / sd_y`, where `sd_y = sqrt(trait_var)` from EPI. The z-score and p-value are invariant — they are identical in both scales.
 
 ## Allele Frequency (AF)
 
@@ -96,9 +126,10 @@ BESD files imported via the legacy path arrive pre-filtered and are stored verba
 
 ## Build Modes (Lean Index)
 
-| Dataset type | AF in ESI | n source | Blocked? |
+| Dataset type | Storage mode | SE source | sd_y source |
 |---|---|---|---|
-| Single cohort, no AF | No | User-supplied scalar (`--sample-size`) | No — AF derived and written to ESI |
-| Single cohort, with AF | Yes | Derived per trait from (se, AF, trait_var) | No |
-| Meta-analysis, with AF | Yes | Derived per pair from (se, AF, trait_var); VectorN mode | No |
-| Meta-analysis, no AF | No | Unresolvable | **Yes — error at build time** |
+| GWAS-SSF (any source with SE) | VectorN | Direct from file (float16) | Auto-estimated from cis SNPs; user override via `trait_var` |
+| Single-cohort BESD, no AF | ScalarN | Reconstructed from n, AF (derived), trait_var | User-supplied `trait_var` or 1.0 |
+| Single-cohort BESD, with AF | ScalarN | Reconstructed from n, AF, trait_var | User-supplied `trait_var` or 1.0 |
+| Meta-analysis BESD, with AF | ScalarN (per-pair n derived at query time) | Reconstructed | User-supplied `trait_var` or 1.0 |
+| Meta-analysis BESD, no AF | — | Unresolvable | **Error at build time** |

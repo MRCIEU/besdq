@@ -366,15 +366,21 @@ class TestGwasSsfEndToEnd(unittest.TestCase):
         # May be empty if no associations passed the filter for this trait
         self.assertIsInstance(assocs, list)
 
-    def test_n_scalar_set(self):
-        """probe_data.n_scalar should be set for each trait (sample size)."""
+    def test_vector_mode_storage(self):
+        """probe_data uses VectorN: se_vector populated, n_scalar NULL for GWAS-SSF imports."""
         self._skip_if_needed()
         import sqlite3
+        import numpy as np
         conn = sqlite3.connect(self.db_path)
-        rows = conn.execute("SELECT n_scalar FROM probe_data").fetchall()
+        rows = conn.execute("SELECT n_scalar, se_vector, snp_count FROM probe_data").fetchall()
         conn.close()
-        for (n,) in rows:
-            self.assertEqual(n, 1060)
+        for n_scalar, se_vector_blob, snp_count in rows:
+            self.assertIsNone(n_scalar, "n_scalar should be NULL in VectorN mode")
+            if snp_count > 0:
+                self.assertIsNotNone(se_vector_blob, "se_vector should be set when snp_count > 0")
+                ses = np.frombuffer(se_vector_blob, dtype=np.float16)
+                self.assertEqual(len(ses), snp_count)
+                self.assertTrue(np.all(ses > 0), "All stored SEs should be positive")
 
     def test_zscores_roundtrip(self):
         """Float16 z-scores decoded from probe_data blobs are finite."""
