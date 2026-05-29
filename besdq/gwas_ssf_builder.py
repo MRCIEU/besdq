@@ -11,7 +11,8 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 from .annotation_reader import TraitConfig
-from .gwas_ssf_reader import GwasSsfRow, read_gwas_ssf
+from .gwas_ssf_fast_reader import _count_data_lines, read_gwas_ssf_candidates
+from .gwas_ssf_reader import GwasSsfRow
 from .significance_filter import apply_significance_filter
 
 
@@ -49,11 +50,23 @@ def _pass1_worker(args: tuple) -> _TraitResult:
     )
 
     result = _TraitResult(trait=trait)
-    all_rows = list(read_gwas_ssf(file_path))
-    result.n_total_read = len(all_rows)
+
+    # Count total rows cheaply (wc -l rather than reading the whole file)
+    result.n_total_read = _count_data_lines(file_path)
+
+    # Stream only the candidates we'll keep (cis unconditional + p < sug_threshold)
+    cis_start = trait_bp - cis_radius if (trait_chr and trait_bp is not None) else None
+    cis_end = trait_bp + cis_radius if (trait_chr and trait_bp is not None) else None
+    candidates = list(read_gwas_ssf_candidates(
+        file_path,
+        cis_chr=trait_chr,
+        cis_start=cis_start,
+        cis_end=cis_end,
+        p_threshold=sug_threshold,
+    ))
 
     filter_result = apply_significance_filter(
-        all_rows,
+        candidates,
         trait_chr=trait_chr,
         trait_bp=trait_bp,
         cis_radius=cis_radius,
@@ -74,7 +87,7 @@ def _pass1_worker(args: tuple) -> _TraitResult:
                 sig_radius=sig_radius,
                 clump_r2=clump_r2,
                 clump_kb=clump_kb,
-                all_rows=all_rows,
+                all_rows=candidates,  # candidates cover p < sug_threshold + all cis
             )
             retained.extend(trans_retained)
         except ImportError:

@@ -81,7 +81,7 @@ Optional columns:
 import-gwas-ssf \
   --trait-annotation data/ebi_input/traits.tsv \
   --ld-reference data/ldref/EUR \
-  --output data/ebi_import/study.db
+  --output data/ebi_input/study.db
 ```
 
 **Significance filtering applied during import:**
@@ -120,13 +120,13 @@ Once built, the index is queried with the standard `besdq` tool:
 
 ```bash
 # Query by SNP
-besdq --besd-index study.db --snp rs12238997 --out results/out
+besdq --besd-index data/ebi_input/study.db --snp rs12238997 --out results/out
 
 # Query by trait ID
-besdq --besd-index study.db --probe GCST90275731 --out results/out
+besdq --besd-index data/ebi_input/study.db --probe GCST90275731 --out results/out
 
 # Query by genomic region
-besdq --besd-index study.db \
+besdq --besd-index data/ebi_input/study.db \
   --snp-chrpos 1:206000000-208000000 \
   --probe-chrpos 1:205000000-208000000 \
   --out results/out
